@@ -1,0 +1,606 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<feed  version="1.0" hasPendingRequests="false" >
+  <company></company>
+  <status>200</status>
+  <errmsg>OK</errmsg>
+  <interval>0</interval>
+    <entry type="predatasource">
+        <version>1679004688</version>
+        <name>Cisco_Meraki_VPN_Stats_nicholasdoane</name>
+        <displayedas>Meraki VPN Status</displayedas>
+        <description>Monitors Meraki VPN connections and operating status.
+
+https://documentation.meraki.com/MX/Site-to-site_VPN/Site-to-Site_VPN_Settings</description>
+        <collector>batchscript</collector>
+        <hasMultiInstances>true</hasMultiInstances>
+        <useWildValueAsUniqueIdentifier>false</useWildValueAsUniqueIdentifier>
+        <schedule>300</schedule>
+        <appliesTo>hasCategory(&#34;MerakiAPINetwork&#34;)</appliesTo>
+        <wildcardauto>true</wildcardauto>
+        <wildcardpersist>true</wildcardpersist>
+        <wildcardlinuxscript>ad_script</wildcardlinuxscript>
+        <wildcardlinuxcmdline>type=&#34;embeded&#34; </wildcardlinuxcmdline>
+        <wildcardwinscript>ad_script</wildcardwinscript>
+        <wildcardwincmdline>type=&#34;embeded&#34; </wildcardwincmdline>
+        <wildcardgroovyscript>/*******************************************************************************
+ *  © 2007-2020 - LogicMonitor, Inc. All rights reserved.
+ ******************************************************************************/
+
+import com.santaba.agent.groovyapi.http.HTTP
+import groovy.json.JsonSlurper
+
+def hostname = &#34;api.meraki.com&#34;
+def token = hostProps.get(&#34;meraki.api.key&#34;)
+def networkId = hostProps.get(&#39;auto.meraki.network.id&#39;)
+def orgId = hostProps.get(&#39;auto.meraki.org.id&#39;)
+def orgIds = hostProps.get(&#39;auto.meraki.org.ids&#39;)
+if (!token) {
+    println &#34;Device property meraki.api.key is not set:&#34;
+    return 1
+}
+
+def debug = true
+
+def JsonSlurper slurper = new JsonSlurper()
+def baseURL = &#34;https://api.meraki.com/api/v0&#34;
+
+// def httpClient = HTTP.open(hostname, 443)
+
+try {
+
+	def orgs = httpGet(slurper, token, baseURL, &#34;/organizations&#34;, debug)
+	if (orgs) {
+        orgs.each { org -&#62;
+            orgIds += org.id
+            LMDebugPrint(&#34;IDs found: ${orgIds}&#34;, debug)
+            // Extract shard for each org to create new base URL for subsequent queries
+            def pattern = ~/https:\/\/(.*)\.meraki\.com.*/
+            def matcher = pattern.matcher(org.url)
+            def orgShard = matcher[0][1]
+            LMDebugPrint(&#34;Fetching devices from org shard ${orgShard}&#34;, debug)
+
+            def newURL = &#34;https://${orgShard}.meraki.com/api/v1&#34;
+			def vpnList = httpGet(slurper, token, newURL, &#34;/organizations/${org.id}/appliance/vpn/statuses&#34;, debug)
+			def vpnIds = [:]
+            if (vpnList) {
+            	LMDebugPrint(&#34;Adding ${vpnList.size()} VPNs from org #${org.id} to device list...\n&#34;, debug)
+				vpnList.each { vpn -&#62;
+					vpnIds[vpn.networkId] = &#34;ddd&#34;
+					if (vpn.networkId == networkId) {
+						def tunnels = vpn.thirdPartyVpnPeers
+				    	tunnels.each { tunnel -&#62;
+						    println sprintf(&#34;%s##%s##%s thirdparty&#34;, tunnel.name.replaceAll(&#39;[ :=#\\\\]&#39;, &#39;_&#39;), tunnel.name.replaceAll(&#39;[ :=#\\\\]&#39;, &#39;_&#39;), tunnel.publicIp.replaceAll(&#39;[ :=#\\\\]&#39;, &#39;_&#39;))
+				    	}
+						def peerTunnels = vpn.merakiVpnPeers
+				    	peerTunnels.each { tunnel -&#62;
+						    println sprintf(&#34;%s##%s##MerakiPeer&#34;, tunnel.networkName.replaceAll(&#39;[ :=#\\\\]&#39;, &#39;_&#39;), tunnel.networkName.replaceAll(&#39;[ :=#\\\\]&#39;, &#39;_&#39;))
+				    	}
+					} //end of If
+				}
+            }
+		}
+	}
+} finally {
+}
+
+return 0
+
+/**
+ * Helper function to print out debug messages for troubleshooting purposes.
+ */
+def LMDebugPrint(message, debug) {
+    if (debug) {
+        println(message.toString())
+    }
+}
+
+
+/* Raw get method. */
+def httpGet(slurper, token, baseURL, endpoint, previousResponse = null, debug) {
+    def headers = [
+        &#34;X-Cisco-Meraki-API-Key&#34;: token.toString(),
+        &#34;Accept&#34;: &#34;application/json&#34;
+    ]
+    def url = baseURL + endpoint
+
+    def request = url.toURL().openConnection()
+
+    headers.each{ k,v -&#62;
+        request.addRequestProperty(k, v)
+    }
+
+    LMDebugPrint(&#34;GET ${url}&#34;, debug)
+    def statusCode = request.getResponseCode()
+    LMDebugPrint(&#34;Status Code: ${statusCode}&#34;, debug)
+
+    if ([200, 429].contains(statusCode)) {
+        def rawResponse = request.content.text
+        def response = slurper.parseText(rawResponse)
+        if (previousResponse) {
+            response += previousResponse
+        }
+
+        if (statusCode == 200) {
+            // // This section appears to only be needed when an organization has over 1000 devices.
+            // // Need to test in an environment where this exists to confirm proper handling.
+
+            // def links = httpClient.getHeader(&#39;link&#39;)
+            // LMDebugPrint(&#34;Links: ${links}&#34;, debug)
+            // if (links) {
+            //     links.split(&#39;,&#39;).each { link -&#62;
+            //         def items = link.split(&#39;;&#39;)
+            //         def rel = items[1].split(&#39;=&#39;)[1]
+            //         if (rel == &#39;next&#39;) {
+            //             println &#34;Entering next...&#34;
+            //             nextEndpoint = link.split(&#39;/api/v0&#39;)[1].split(&#39;&#62;&#39;)[0]
+            //             return httpGet(slurper, httpClient, token, baseURL, nextEndpoint, response, debug)
+            //         }
+            //     }
+            // }
+            return response
+        } 
+        else if (statusCode == 429) {
+
+            def retryIn = request.getHeader(&#39;Retry-After&#39;).toInteger()
+            LMDebugPrint(&#34;Retry in ${retryIn} secs&#34;, debug)
+
+            sleep(retryIn * 1000)
+            
+            return httpGet(slurper, token, endpoint, previousResponse, debug)
+        }
+    }
+
+    LMDebugPrint(&#34;Error occurred for URL ${url}&#34;, debug)
+    LMDebugPrint(&#34;Status Code: ${statusCode}&#34;, debug)
+
+    return null
+}</wildcardgroovyscript>
+        <wildcardschedule>60</wildcardschedule>
+        <wildcarddisable>false</wildcarddisable>
+        <wildcarddeleteinactive>true</wildcarddeleteinactive>
+        <agdmethod>none</agdmethod>
+        <agdparams></agdparams>
+        <group></group>
+        <tags>meraki,networking,wireless,cisco</tags>
+        <technology>Tunnel status reports successfully for Meraki-to-Meraki tunnels and Meraki-to-3rd-Party tunnels.
+
+Traffic throughput statistics only report for Meraki-to-Meraki tunnels, as limited by the Cisco Meraki API.
+
+Uses custom property &#34;meraki.api.key&#34; and auto properties from PropertySource &#34;addCategoryMerakiAPI&#34;
+
+This version fixes a problem with discovery and data collection for network names and tunnel names that contain spaces or special characters. It also fixes a display name issue with Meraki-to-Meraki tunnels that was causing the network ID of the peer network to be displayed instead of the network name. This version also includes improved graphs for the collected metrics.
+
+Related Cisco Meraki API documentation:
+https://developer.cisco.com/meraki/api-v1/#!get-organization-appliance-vpn-statuses
+https://developer.cisco.com/meraki/api-v1/#!get-organization-appliance-vpn-stats</technology>
+        <adlist><![CDATA[{"agdmethod":"none","method":"ad_script","agdparams":"","id":0,"filters":[],"params":{"type":"embeded","groovyscript":"/*******************************************************************************\n *  © 2007-2020 - LogicMonitor, Inc. All rights reserved.\n ******************************************************************************/\n\nimport com.santaba.agent.groovyapi.http.HTTP\nimport groovy.json.JsonSlurper\n\ndef hostname = \"api.meraki.com\"\ndef token = hostProps.get(\"meraki.api.key\")\ndef networkId = hostProps.get('auto.meraki.network.id')\ndef orgId = hostProps.get('auto.meraki.org.id')\ndef orgIds = hostProps.get('auto.meraki.org.ids')\nif (!token) {\n    println \"Device property meraki.api.key is not set:\"\n    return 1\n}\n\ndef debug = true\n\ndef JsonSlurper slurper = new JsonSlurper()\ndef baseURL = \"https://api.meraki.com/api/v0\"\n\n// def httpClient = HTTP.open(hostname, 443)\n\ntry {\n\n\tdef orgs = httpGet(slurper, token, baseURL, \"/organizations\", debug)\n\tif (orgs) {\n        orgs.each { org ->\n            orgIds += org.id\n            LMDebugPrint(\"IDs found: ${orgIds}\", debug)\n            // Extract shard for each org to create new base URL for subsequent queries\n            def pattern = ~/https:\\/\\/(.*)\\.meraki\\.com.*/\n            def matcher = pattern.matcher(org.url)\n            def orgShard = matcher[0][1]\n            LMDebugPrint(\"Fetching devices from org shard ${orgShard}\", debug)\n\n            def newURL = \"https://${orgShard}.meraki.com/api/v1\"\n\t\t\tdef vpnList = httpGet(slurper, token, newURL, \"/organizations/${org.id}/appliance/vpn/statuses\", debug)\n\t\t\tdef vpnIds = [:]\n            if (vpnList) {\n            \tLMDebugPrint(\"Adding ${vpnList.size()} VPNs from org #${org.id} to device list...\\n\", debug)\n\t\t\t\tvpnList.each { vpn ->\n\t\t\t\t\tvpnIds[vpn.networkId] = \"ddd\"\n\t\t\t\t\tif (vpn.networkId == networkId) {\n\t\t\t\t\t\tdef tunnels = vpn.thirdPartyVpnPeers\n\t\t\t\t    \ttunnels.each { tunnel ->\n\t\t\t\t\t\t    println sprintf(\"%s##%s##%s thirdparty\", tunnel.name.replaceAll('[ :=#\\\\\\\\]', '_'), tunnel.name.replaceAll('[ :=#\\\\\\\\]', '_'), tunnel.publicIp.replaceAll('[ :=#\\\\\\\\]', '_'))\n\t\t\t\t    \t}\n\t\t\t\t\t\tdef peerTunnels = vpn.merakiVpnPeers\n\t\t\t\t    \tpeerTunnels.each { tunnel ->\n\t\t\t\t\t\t    println sprintf(\"%s##%s##MerakiPeer\", tunnel.networkName.replaceAll('[ :=#\\\\\\\\]', '_'), tunnel.networkName.replaceAll('[ :=#\\\\\\\\]', '_'))\n\t\t\t\t    \t}\n\t\t\t\t\t} //end of If\n\t\t\t\t}\n            }\n\t\t}\n\t}\n} finally {\n}\n\nreturn 0\n\n/**\n * Helper function to print out debug messages for troubleshooting purposes.\n */\ndef LMDebugPrint(message, debug) {\n    if (debug) {\n        println(message.toString())\n    }\n}\n\n\n/* Raw get method. */\ndef httpGet(slurper, token, baseURL, endpoint, previousResponse = null, debug) {\n    def headers = [\n        \"X-Cisco-Meraki-API-Key\": token.toString(),\n        \"Accept\": \"application/json\"\n    ]\n    def url = baseURL + endpoint\n\n    def request = url.toURL().openConnection()\n\n    headers.each{ k,v ->\n        request.addRequestProperty(k, v)\n    }\n\n    LMDebugPrint(\"GET ${url}\", debug)\n    def statusCode = request.getResponseCode()\n    LMDebugPrint(\"Status Code: ${statusCode}\", debug)\n\n    if ([200, 429].contains(statusCode)) {\n        def rawResponse = request.content.text\n        def response = slurper.parseText(rawResponse)\n        if (previousResponse) {\n            response += previousResponse\n        }\n\n        if (statusCode == 200) {\n            // // This section appears to only be needed when an organization has over 1000 devices.\n            // // Need to test in an environment where this exists to confirm proper handling.\n\n            // def links = httpClient.getHeader('link')\n            // LMDebugPrint(\"Links: ${links}\", debug)\n            // if (links) {\n            //     links.split(',').each { link ->\n            //         def items = link.split(';')\n            //         def rel = items[1].split('=')[1]\n            //         if (rel == 'next') {\n            //             println \"Entering next...\"\n            //             nextEndpoint = link.split('/api/v0')[1].split('>')[0]\n            //             return httpGet(slurper, httpClient, token, baseURL, nextEndpoint, response, debug)\n            //         }\n            //     }\n            // }\n            return response\n        } \n        else if (statusCode == 429) {\n\n            def retryIn = request.getHeader('Retry-After').toInteger()\n            LMDebugPrint(\"Retry in ${retryIn} secs\", debug)\n\n            sleep(retryIn * 1000)\n            \n            return httpGet(slurper, token, endpoint, previousResponse, debug)\n        }\n    }\n\n    LMDebugPrint(\"Error occurred for URL ${url}\", debug)\n    LMDebugPrint(\"Status Code: ${statusCode}\", debug)\n\n    return null\n}"}}]]></adlist>
+        <schemaVersion>2</schemaVersion>
+        <dataSourceType>1</dataSourceType>
+        <attributes>
+        <attribute>
+            <name>scripttype</name>
+            <value>embed</value>
+            <comment></comment>
+        </attribute>
+        <attribute>
+            <name>scriptgroovy</name>
+            <value>/*******************************************************************************
+ *  © 2007-2020 - LogicMonitor, Inc. All rights reserved.
+ ******************************************************************************/
+
+import com.santaba.agent.groovyapi.http.HTTP
+import groovy.json.JsonSlurper
+
+def hostname = &#34;api.meraki.com&#34;
+def token = hostProps.get(&#34;meraki.api.key&#34;)
+def networkId = hostProps.get(&#39;auto.meraki.network.id&#39;)
+def orgId = hostProps.get(&#39;auto.meraki.org.id&#39;)
+def orgIds = hostProps.get(&#39;auto.meraki.org.ids&#39;)
+if (!token) {
+    println &#34;Device property meraki.api.key is not set:&#34;
+    return 1
+}
+
+def debug = false
+
+def JsonSlurper slurper = new JsonSlurper()
+def baseURL = &#34;https://api.meraki.com/api/v0&#34;
+
+// def httpClient = HTTP.open(hostname, 443)
+
+try {
+
+	def orgs = httpGet(slurper, token, baseURL, &#34;/organizations&#34;, debug)
+	if (orgs) {
+        orgs.each { org -&#62;
+            orgIds += org.id
+            LMDebugPrint(&#34;IDs found: ${orgIds}&#34;, debug)
+            // Extract shard for each org to create new base URL for subsequent queries
+            def pattern = ~/https:\/\/(.*)\.meraki\.com.*/
+            def matcher = pattern.matcher(org.url)
+            def orgShard = matcher[0][1]
+            LMDebugPrint(&#34;Fetching devices from org shard ${orgShard}&#34;, debug)
+
+            def newURL = &#34;https://${orgShard}.meraki.com/api/v1&#34;
+			def vpnList = httpGet(slurper, token, newURL, &#34;/organizations/${org.id}/appliance/vpn/statuses&#34;, debug)
+            if (vpnList) {
+            	LMDebugPrint(&#34;Adding ${vpnList.size()} VPNs from org #${org.id} to device list...\n&#34;, debug)
+				vpnList.each { vpn -&#62;
+					if (vpn.networkId == networkId) {
+					    def tunnels = vpn.thirdPartyVpnPeers
+					    tunnels.each { tunnel -&#62;
+						   def status = 0
+						   if (tunnel.reachability == &#34;reachable&#34;) { status = 1 }
+						   println sprintf(&#34;%s.status=%d&#34;, tunnel.name.replaceAll(&#39;[ :=#\\\\]&#39;, &#39;_&#39;), status)
+					    }
+						def peerTunnels = vpn.merakiVpnPeers
+				    	peerTunnels.each { tunnel -&#62;
+				    	    def status = 0
+				    	    if (tunnel.reachability == &#34;reachable&#34;) { status = 1 }
+						    println sprintf(&#34;%s.status=%d&#34;, tunnel.networkName.replaceAll(&#39;[ :=#\\\\]&#39;, &#39;_&#39;), status)
+				    	}
+					} // end of If (vpn.networkId == networkId)
+				} // end of vpnList.each
+            } // end of if (vpnList)
+            
+            def vpnStats = httpGet(slurper, token, newURL, &#34;/organizations/${org.id}/appliance/vpn/stats&#34;, debug)
+            if (vpnStats) {
+                vpnStats.each { vpn -&#62;
+					if (vpn.networkId == networkId) {
+						def peerTunnels = vpn.merakiVpnPeers
+						peerTunnels.each { tunnel -&#62;
+						    println sprintf(&#34;%s.recvKB=%s&#34;, tunnel.networkName.replaceAll(&#39;[ :=#\\\\]&#39;, &#39;_&#39;), tunnel.usageSummary.receivedInKilobytes)
+						    println sprintf(&#34;%s.sentKB=%s&#34;, tunnel.networkName.replaceAll(&#39;[ :=#\\\\]&#39;, &#39;_&#39;), tunnel.usageSummary.sentInKilobytes)
+
+				    	}
+					}
+                }
+            }
+		}
+	}
+} finally {
+}
+
+return 0
+
+/**
+ * Helper function to print out debug messages for troubleshooting purposes.
+ */
+def LMDebugPrint(message, debug) {
+    if (debug) {
+        println(message.toString())
+    }
+}
+
+
+/* Raw get method. */
+def httpGet(slurper, token, baseURL, endpoint, previousResponse = null, debug) {
+    def headers = [
+        &#34;X-Cisco-Meraki-API-Key&#34;: token.toString(),
+        &#34;Accept&#34;: &#34;application/json&#34;
+    ]
+    def url = baseURL + endpoint
+
+    def request = url.toURL().openConnection()
+
+    headers.each{ k,v -&#62;
+        request.addRequestProperty(k, v)
+    }
+
+    LMDebugPrint(&#34;GET ${url}&#34;, debug)
+    def statusCode = request.getResponseCode()
+    LMDebugPrint(&#34;Status Code: ${statusCode}&#34;, debug)
+
+    if ([200, 429].contains(statusCode)) {
+        def rawResponse = request.content.text
+        def response = slurper.parseText(rawResponse)
+        if (previousResponse) {
+            response += previousResponse
+        }
+
+        if (statusCode == 200) {
+            // // This section appears to only be needed when an organization has over 1000 devices.
+            // // Need to test in an environment where this exists to confirm proper handling.
+
+            // def links = httpClient.getHeader(&#39;link&#39;)
+            // LMDebugPrint(&#34;Links: ${links}&#34;, debug)
+            // if (links) {
+            //     links.split(&#39;,&#39;).each { link -&#62;
+            //         def items = link.split(&#39;;&#39;)
+            //         def rel = items[1].split(&#39;=&#39;)[1]
+            //         if (rel == &#39;next&#39;) {
+            //             println &#34;Entering next...&#34;
+            //             nextEndpoint = link.split(&#39;/api/v0&#39;)[1].split(&#39;&#62;&#39;)[0]
+            //             return httpGet(slurper, httpClient, token, baseURL, nextEndpoint, response, debug)
+            //         }
+            //     }
+            // }
+            return response
+        } 
+        else if (statusCode == 429) {
+
+            def retryIn = request.getHeader(&#39;Retry-After&#39;).toInteger()
+            LMDebugPrint(&#34;Retry in ${retryIn} secs&#34;, debug)
+
+            sleep(retryIn * 1000)
+            
+            return httpGet(slurper, token, endpoint, previousResponse, debug)
+        }
+    }
+
+    LMDebugPrint(&#34;Error occurred for URL ${url}&#34;, debug)
+    LMDebugPrint(&#34;Status Code: ${statusCode}&#34;, debug)
+
+    return null
+}</value>
+            <comment></comment>
+        </attribute>
+        <attribute>
+            <name>windowsscript</name>
+            <value></value>
+            <comment></comment>
+        </attribute>
+        <attribute>
+            <name>linuxscript</name>
+            <value></value>
+            <comment></comment>
+        </attribute>
+        <attribute>
+            <name>windowscmdline</name>
+            <value></value>
+            <comment></comment>
+        </attribute>
+        <attribute>
+            <name>linuxcmdline</name>
+            <value></value>
+            <comment></comment>
+        </attribute>
+        </attributes>
+        <datapoints>
+        <datapoint>
+            <name>receivedInKB</name>
+            <originId>DJiMZWogRSGeg0x_vPbEbA</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>namevalue</postprocessormethod>
+            <postprocessorparam>##WILDVALUE##.recvKB</postprocessorparam>
+            <usevalue>output</usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody></alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description></description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>0</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>sentInKB</name>
+            <originId>2TszJJzJS1uRhZM7XQpIfA</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>namevalue</postprocessormethod>
+            <postprocessorparam>##WILDVALUE##.sentKB</postprocessorparam>
+            <usevalue>output</usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody></alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description></description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>0</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>vpnStatus</name>
+            <originId>Ugnt_fhRTfSP8QDeVhYcng</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>namevalue</postprocessormethod>
+            <postprocessorparam>##WILDVALUE##.status</postprocessorparam>
+            <usevalue>output</usevalue>
+            <alertexpr>= 0 0</alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject>- ##CLIENT## ##DATASOURCE## went Down</alertsubject>
+            <alertbody>Client: ##Client##
+Host: ##HOST##
+Group: ##GROUP##
+Datasource: ##DATASOURCE##
+Level: ##LEVEL##
+Start: ##START##
+End: ##END##
+Duration: ##DURATION##
+Value: ##VALUE##
+ClearValue: ##CLEARVALUE##
+
+
+Note:
+##HOSTDESCRIPTION##
+
+Alert Info
+Client: ##CLIENT##
+Datasource: ##DATASOURCE##
+Cisco Meraki VPN: ##MERAKI.NETWORK.NAME##
+Level: ##LEVEL##
+Start: ##START##</alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>A value of &#34;1&#34; indicates that the tunnel is up while a value of &#34;0&#34; indicates that the tunnel is down.</description>
+            <maxvalue>1</maxvalue>
+            <minvalue>0</minvalue>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>3</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>trafficActivity</name>
+            <originId>N0lbD_ooT4uVoyuHjsMFCw</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>expression</postprocessormethod>
+            <postprocessorparam>sentInKB + receivedInKB</postprocessorparam>
+            <usevalue></usevalue>
+            <alertexpr>= 0</alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody></alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>SentInKB + ReceivedInKB</description>
+            <maxvalue></maxvalue>
+            <minvalue>0</minvalue>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>0</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
+        </datapoints>
+        <graphs>
+        <graph>
+            <name>Connection Status</name>
+            <title>Connection Status</title>
+            <originId></originId>            <verticallabel>0=disconnected, 1=connected</verticallabel>
+            <rigid>false</rigid>
+            <maxvalue>2.0</maxvalue>
+            <minvalue>-1.0</minvalue>
+            <displayprio>2</displayprio>
+            <timescale>1day</timescale>
+            <base1024>false</base1024>
+            <graphdatapoints>
+        <graphdatapoint>
+            <name>vpnStatus</name>
+            <datapointname>vpnStatus</datapointname>
+            <originId></originId>
+            <cf>1</cf>
+        </graphdatapoint>
+            </graphdatapoints>
+            <graphvirtualdatapoints>
+            </graphvirtualdatapoints>
+            <graphdatas>
+            <graphdata>
+                <type>1</type>
+                <legend>vpnStatus</legend>
+                <color>silver</color>
+                <datapointname>vpnStatus</datapointname>
+                <isvirtualdatapoint>false</isvirtualdatapoint>
+            </graphdata>
+            </graphdatas>
+        </graph>
+        <graph>
+            <name>Traffic Activity</name>
+            <title>Traffic Activity</title>
+            <originId></originId>            <verticallabel>KB</verticallabel>
+            <rigid>false</rigid>
+            <maxvalue>NaN</maxvalue>
+            <minvalue>0.0</minvalue>
+            <displayprio>1</displayprio>
+            <timescale>1day</timescale>
+            <base1024>false</base1024>
+            <graphdatapoints>
+        <graphdatapoint>
+            <name>receivedInKB</name>
+            <datapointname>receivedInKB</datapointname>
+            <originId></originId>
+            <cf>1</cf>
+        </graphdatapoint>
+        <graphdatapoint>
+            <name>sentInKB</name>
+            <datapointname>sentInKB</datapointname>
+            <originId></originId>
+            <cf>1</cf>
+        </graphdatapoint>
+            </graphdatapoints>
+            <graphvirtualdatapoints>
+            </graphvirtualdatapoints>
+            <graphdatas>
+            <graphdata>
+                <type>1</type>
+                <legend>receivedInKB</legend>
+                <color>silver</color>
+                <datapointname>receivedInKB</datapointname>
+                <isvirtualdatapoint>false</isvirtualdatapoint>
+            </graphdata>
+            <graphdata>
+                <type>1</type>
+                <legend>sentInKB</legend>
+                <color>silver</color>
+                <datapointname>sentInKB</datapointname>
+                <isvirtualdatapoint>false</isvirtualdatapoint>
+            </graphdata>
+            </graphdatas>
+        </graph>
+        </graphs>
+        <overviewgraphs>
+        <overviewgraph>
+            <name>Top 10 Tunnels by Traffic Activity</name>
+            <title>Top 10 Tunnels by Traffic Activity</title>
+            <verticallabel>KB</verticallabel>
+            <rigid>true</rigid>
+            <maxvalue>NaN</maxvalue>
+            <minvalue>0.0</minvalue>
+            <displayprio>2</displayprio>
+            <timescale>1day</timescale>
+            <base1024>false</base1024>
+            <aggregated>false</aggregated>
+            <originId></originId>
+            <datapoints>
+        <overviewgraphdatapoint>
+            <name>trafficActivity</name>
+            <datapointname>trafficActivity</datapointname>
+            <cf>1</cf>
+            <aggregateMethod>sum</aggregateMethod>
+            <originId></originId>
+        </overviewgraphdatapoint>
+            </datapoints>
+            <virtualdatapoints>
+            </virtualdatapoints>
+            <lines>
+            <overviewgraphline>
+                <type>1</type>
+                <legend>##INSTANCE##</legend>
+                <datapointname>trafficActivity</datapointname>
+                <isvirtualdatapoint>false</isvirtualdatapoint>
+                <color>silver</color>
+            </overviewgraphline>
+            </lines>
+        </overviewgraph>
+        </overviewgraphs>
+        <scripts>
+        </scripts>
+    </entry>
+</feed>
